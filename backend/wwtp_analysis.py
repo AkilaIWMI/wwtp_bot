@@ -210,9 +210,14 @@ def get_real_world_radius(image_path, detection_box, bbox_coverage_meters=250):
     center_x = (xmin + xmax) / 2.0
     center_y = (ymin + ymax) / 2.0
     
+    # Calculate surface area (π × r²)
+    import math
+    surface_area = math.pi * (radius_meters ** 2)
+    
     return {
         'radius_meters': round(radius_meters, 2),
         'diameter_meters': round(diameter_meters, 2),
+        'surface_area_sqm': round(surface_area, 2),
         'diameter_pixels': round(diameter_pixels, 2),
         'meters_per_pixel': round(meters_per_pixel, 4),
         'center_x': round(center_x, 2),
@@ -258,10 +263,11 @@ def draw_predictions(image, results, class_names, class_colors, image_path, bbox
         bbox_coverage_meters: Real-world coverage in meters
         
     Returns:
-        tuple: (annotated_image, circular_tank_data)
+        tuple: (annotated_image, circular_tank_data, all_detections)
     """
     annotated_image = image.copy()
     circular_tank_data = []
+    all_detections = []
     
     # Get the first result (single image inference)
     result = results[0]
@@ -286,6 +292,15 @@ def draw_predictions(image, results, class_names, class_colors, image_path, bbox
         print(f"  Confidence: {conf:.2f}")
         print(f"  Bounding Box: ({x1}, {y1}, {x2}, {y2})")
         
+        # Store detection info for all objects
+        detection_info = {
+            'object_id': i + 1,
+            'class_name': class_name,
+            'class_id': int(cls_id),
+            'confidence': float(conf),
+            'bounding_box': [int(x1), int(y1), int(x2), int(y2)]
+        }
+        
         # Calculate real-world radius for circular tanks
         if cls_id == 0:  # Circular-Tank
             measurements = get_real_world_radius(
@@ -294,13 +309,8 @@ def draw_predictions(image, results, class_names, class_colors, image_path, bbox
                 bbox_coverage_meters
             )
             
-            circular_tank_data.append({
-                'object_id': i + 1,
-                'class_name': class_name,
-                'confidence': conf,
-                'bounding_box': [x1, y1, x2, y2],
-                'measurements': measurements
-            })
+            detection_info['measurements'] = measurements
+            circular_tank_data.append(detection_info)
             
             print(f"  Real-World Measurements:")
             print(f"    - Radius: {measurements['radius_meters']} meters")
@@ -318,6 +328,9 @@ def draw_predictions(image, results, class_names, class_colors, image_path, bbox
             label = f"{class_name}: {conf:.2f} | R={measurements['radius_meters']}m"
         else:
             label = f"{class_name}: {conf:.2f}"
+        
+        # Add to all detections list
+        all_detections.append(detection_info)
         
         # Draw bounding box
         cv2.rectangle(annotated_image, (x1, y1), (x2, y2), color, 2)
@@ -347,7 +360,8 @@ def draw_predictions(image, results, class_names, class_colors, image_path, bbox
             2
         )
     
-    return annotated_image, circular_tank_data
+    return annotated_image, circular_tank_data, all_detections
+
 
 
 def save_image(image, output_path):
@@ -390,6 +404,138 @@ def print_summary(circular_tank_data):
         print(f"  Bounding Box: {tank['bounding_box']}")
     
     print("\n" + "=" * 80)
+
+
+def analyze_wwtp(lat, lon, output_dir="Data"):
+    """
+    Analyze WWTP from satellite imagery at given coordinates.
+    
+    This function orchestrates the complete pipeline:
+    1. Download satellite image
+    2. Run YOLO inference
+    3. Calculate measurements for circular tanks
+    4. Save annotated image
+    
+    Args:
+        lat (float): Latitude coordinate
+        lon (float): Longitude coordinate
+        output_dir (str): Directory to save images (default: "Data")
+        
+    Returns:
+        dict: Results dictionary containing:
+            - success (bool): Whether analysis completed successfully
+            - wwtp_detected (bool): Whether any WWTP-related objects were detected
+            - circular_tanks (list): List of circular tank data with measurements
+            - all_detections (list): All detected objects
+            - detection_counts (dict): Count of each class detected
+            - annotated_image_path (str): Path to annotated image
+            - satellite_image_path (str): Path to original satellite image
+            - error (str): Error message if failed
+    """
+    try:
+        # Create output directory if it doesn't exist
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+            print(f"Created directory: {output_dir}")
+        
+        # Step 1: Download satellite image
+        print(f"\n{'='*80}")
+        print("STEP 1: Downloading Satellite Image")
+        print(f"{'='*80}")
+        
+        satellite_image_path = os.path.join(output_dir, f"satellite_{lat}_{lon}.tif")
+        
+        download_satellite_image(
+            lat=lat,
+            lon=lon,
+            output_path=satellite_image_path,
+            bbox_size=BBOX_SIZE,
+            zoom=ZOOM_LEVEL
+        )
+        
+        # Step 2: Check if model exists
+        print(f"\n{'='*80}")
+        print("STEP 2: Loading YOLO Model")
+        print(f"{'='*80}")
+        
+        if not MODEL_PATH.exists():
+            return {
+                'success': False,
+                'wwtp_detected': False,
+                'circular_tanks': [],
+                'all_detections': [],
+                'detection_counts': {},
+                'annotated_image_path': None,
+                'satellite_image_path': satellite_image_path,
+                'error': f"Model file not found at {MODEL_PATH}"
+            }
+        
+        # Step 3: Run YOLO inference
+        print(f"\n{'='*80}")
+        print("STEP 3: Running YOLO Inference")
+        print(f"{'='*80}")
+        
+        image, results = run_yolo_inference(MODEL_PATH, satellite_image_path, conf_threshold=CONF_THRESHOLD)
+        
+        # Step 4: Draw predictions and calculate measurements
+        print(f"\n{'='*80}")
+        print("STEP 4: Calculating Measurements")
+        print(f"{'='*80}")
+        
+        annotated_image, circular_tank_data, all_detections = draw_predictions(
+            image, results, CLASS_NAMES, CLASS_COLORS, satellite_image_path, BBOX_SIZE
+        )
+        
+        # Step 5: Save annotated image
+        print(f"\n{'='*80}")
+        print("STEP 5: Saving Results")
+        print(f"{'='*80}")
+        
+        output_path = os.path.join(output_dir, f"annotated_{lat}_{lon}.jpg")
+        save_image(annotated_image, output_path)
+        
+        # Calculate detection counts
+        detection_counts = {}
+        for detection in all_detections:
+            class_name = detection['class_name']
+            detection_counts[class_name] = detection_counts.get(class_name, 0) + 1
+        
+        # Check if WWTP was detected
+        wwtp_detected = any(d['class_name'] == 'WWTP' for d in all_detections)
+        
+        # Print summary
+        print_summary(circular_tank_data)
+        
+        print(f"\n{'='*80}")
+        print("ANALYSIS COMPLETED SUCCESSFULLY!")
+        print(f"{'='*80}")
+        
+        return {
+            'success': True,
+            'wwtp_detected': wwtp_detected,
+            'circular_tanks': circular_tank_data,
+            'all_detections': all_detections,
+            'detection_counts': detection_counts,
+            'annotated_image_path': output_path,
+            'satellite_image_path': satellite_image_path,
+            'error': None
+        }
+        
+    except Exception as e:
+        print(f"\n{'='*80}")
+        print(f"ERROR: Analysis failed - {str(e)}")
+        print(f"{'='*80}")
+        
+        return {
+            'success': False,
+            'wwtp_detected': False,
+            'circular_tanks': [],
+            'all_detections': [],
+            'detection_counts': {},
+            'annotated_image_path': None,
+            'satellite_image_path': None,
+            'error': str(e)
+        }
 
 
 def main():
@@ -445,7 +591,7 @@ def main():
     print("STEP 4: Calculating Measurements")
     print("=" * 80)
     
-    annotated_image, circular_tank_data = draw_predictions(
+    annotated_image, circular_tank_data, all_detections = draw_predictions(
         image, results, CLASS_NAMES, CLASS_COLORS, satellite_image_path, BBOX_SIZE
     )
     
