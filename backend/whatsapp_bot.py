@@ -335,6 +335,9 @@ async def whatsapp_webhook(request: Request, Body: str = Form(""), Latitude: str
         try:
             lat = float(Latitude)
             lon = float(Longitude)
+
+            lat = round(lat, 4)
+            lon = round(lon, 4)
             print(f"✓ Received location share: ({lat}, {lon})")
             
             # Validate coordinates

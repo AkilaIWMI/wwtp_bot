@@ -7,6 +7,7 @@ and calculates real-world measurements for circular wastewater treatment tanks.
 import os
 import math
 import time
+import traceback
 from pathlib import Path
 import cv2
 import numpy as np
@@ -103,18 +104,27 @@ def download_satellite_image(lat, lon, output_path, bbox_size=100, zoom=19, sour
     # Calculate bounding box
     bbox = calculate_bbox(lat, lon, bbox_size)
     
+    # Debug: Print bbox details
+    print(f"  DEBUG: Calculated bbox for lat={lat}, lon={lon}, size={bbox_size}m")
+    print(f"  DEBUG: bbox = {bbox}")
+    
     retry_count = 0
     
     while retry_count < max_retries:
         try:
             # Download the image with the specified bounding box and zoom level
+            print(f"  Attempting to download satellite image with leafmap...")
+            print(f"  Output path: {output_path}")
+            print(f"  Bbox: {bbox}")
+            print(f"  Zoom: {zoom}, Source: {source}")
+            
             leafmap.tms_to_geotiff(
                 output=output_path, 
                 bbox=bbox, 
                 zoom=zoom, 
                 source=source, 
                 overwrite=True, 
-                quiet=True
+                quiet=False  # Changed to False to see any error messages
             )
             print(f"✓ Image successfully downloaded to: {output_path}")
             print(f"  Center: ({lat}, {lon})")
@@ -123,7 +133,13 @@ def download_satellite_image(lat, lon, output_path, bbox_size=100, zoom=19, sour
             return True
             
         except Exception as e:
-            print(f"✗ Attempt {retry_count + 1} failed: {str(e)}")
+            error_type = type(e).__name__
+            error_msg = str(e) if str(e) else "(no error message)"
+            print(f"✗ Attempt {retry_count + 1} failed:")
+            print(f"  Error Type: {error_type}")
+            print(f"  Error Message: {error_msg}")
+            print(f"  Traceback:")
+            traceback.print_exc()
             retry_count += 1
             
             if retry_count < max_retries:
@@ -132,6 +148,7 @@ def download_satellite_image(lat, lon, output_path, bbox_size=100, zoom=19, sour
                 time.sleep(sleep_time)
             else:
                 print(f"✗ Failed after {max_retries} attempts.")
+                print(f"  Final error: {error_type}: {error_msg}")
                 raise
     
     return False
