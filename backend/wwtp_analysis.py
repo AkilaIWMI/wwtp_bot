@@ -280,6 +280,9 @@ def draw_predictions(image, results, class_names, class_colors, image_path, bbox
     print(f"\nDetected {len(boxes)} objects:")
     print("=" * 80)
     
+    # Track circular tank IDs separately for unique numbering
+    circular_tank_counter = 0
+    
     # Draw each detection
     for i, (box, conf, cls_id) in enumerate(zip(boxes, confidences, class_ids)):
         x1, y1, x2, y2 = box.astype(int)
@@ -303,6 +306,9 @@ def draw_predictions(image, results, class_names, class_colors, image_path, bbox
         
         # Calculate real-world radius for circular tanks
         if cls_id == 0:  # Circular-Tank
+            circular_tank_counter += 1
+            tank_id = circular_tank_counter
+            
             measurements = get_real_world_radius(
                 image_path, 
                 [x1, y1, x2, y2], 
@@ -310,8 +316,10 @@ def draw_predictions(image, results, class_names, class_colors, image_path, bbox
             )
             
             detection_info['measurements'] = measurements
+            detection_info['tank_id'] = tank_id  # Add unique tank ID
             circular_tank_data.append(detection_info)
             
+            print(f"  Tank ID: {tank_id}")
             print(f"  Real-World Measurements:")
             print(f"    - Radius: {measurements['radius_meters']} meters")
             print(f"    - Diameter: {measurements['diameter_meters']} meters")
@@ -323,6 +331,42 @@ def draw_predictions(image, results, class_names, class_colors, image_path, bbox
             center_y = int(measurements['center_y'])
             cv2.circle(annotated_image, (center_x, center_y), 5, color, -1)
             cv2.circle(annotated_image, (center_x, center_y), 8, (255, 255, 255), 2)
+            
+            # Draw large unique ID number on the tank
+            id_text = f"#{tank_id}"
+            id_font_scale = 1.5
+            id_thickness = 3
+            
+            # Get ID text size for positioning
+            (id_width, id_height), id_baseline = cv2.getTextSize(
+                id_text, cv2.FONT_HERSHEY_DUPLEX, id_font_scale, id_thickness
+            )
+            
+            # Position ID at top-left corner of bounding box, slightly inside
+            id_x = x1 + 10
+            id_y = y1 + id_height + 15
+            
+            # Draw black outline for better visibility
+            cv2.putText(
+                annotated_image,
+                id_text,
+                (id_x, id_y),
+                cv2.FONT_HERSHEY_DUPLEX,
+                id_font_scale,
+                (0, 0, 0),  # Black outline
+                id_thickness + 2
+            )
+            
+            # Draw white ID text
+            cv2.putText(
+                annotated_image,
+                id_text,
+                (id_x, id_y),
+                cv2.FONT_HERSHEY_DUPLEX,
+                id_font_scale,
+                (255, 255, 255),  # White text
+                id_thickness
+            )
             
             # Create enhanced label with radius
             label = f"{class_name}: {conf:.2f} | R={measurements['radius_meters']}m"
