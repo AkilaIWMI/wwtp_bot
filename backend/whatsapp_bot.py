@@ -19,6 +19,7 @@ from fastapi import FastAPI, Form, Response, Request
 from twilio.twiml.messaging_response import MessagingResponse
 from wwtp_analysis import analyze_wwtp
 from gemini_analysis import analyze_image_with_gemini
+from excel_utils import save_and_upload_tank_data
 
 app = FastAPI()
 
@@ -436,6 +437,37 @@ async def whatsapp_webhook(request: Request, Body: str = Form(""), Latitude: str
         # Calculate volumes
         volume_data = calculate_tank_volumes(circular_tanks, session['tank_heights'])
         print(f"Volume calculation: {volume_data}")
+        
+        # Save tank data to Excel
+        print(f"\n{'='*80}")
+        print("Saving Tank Data to Excel")
+        print(f"{'='*80}")
+        try:
+            # Get WWTP location from session
+            wwtp_location = (session['lat'], session['lon'])
+            
+            # Save and upload to GCP
+            excel_result = save_and_upload_tank_data(
+                phone_number=From,
+                wwtp_location=wwtp_location,
+                circular_tanks=circular_tanks,
+                tank_heights=session['tank_heights'],
+                volume_data=volume_data,
+                satellite_image_path=session['satellite_image_path'],
+                output_dir="Data",
+                upload_to_gcp=True
+            )
+            
+            if excel_result['success']:
+                print(f"✓ Excel saved locally: {excel_result['local_path']}")
+                if excel_result['gcs_uri']:
+                    print(f"✓ Excel uploaded to GCP: {excel_result['gcs_uri']}")
+                else:
+                    print(f"⚠️ GCP upload failed (saved locally only)")
+            else:
+                print(f"⚠️ Excel save failed (continuing with summary)")
+        except Exception as e:
+            print(f"⚠️ Excel save error (continuing with summary): {str(e)}")
         
         # Run Gemini AI analysis
         gemini_data = None
