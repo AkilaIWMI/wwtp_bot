@@ -11,9 +11,62 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
+# Import GCP utilities for bucket operations
+try:
+    from . import gcp_utils  # When used as module
+except ImportError:
+    import gcp_utils  # When run as standalone script
+
 
 # Load environment variables from .env file
 load_dotenv()
+
+
+def ensure_local_image(image_path: str, cache_dir: str = "Data/cache") -> str:
+    """
+    Ensure image is available locally, downloading from GCS bucket if needed.
+    
+    Args:
+        image_path: Path to image (local path or GCS URI gs://bucket/path)
+        cache_dir: Directory to cache downloaded images
+        
+    Returns:
+        str: Local path to the image
+        
+    Raises:
+        FileNotFoundError: If image doesn't exist locally or in bucket
+    """
+    # If it's a GCS URI, download it
+    if gcp_utils.is_gcs_uri(image_path):
+        print(f"Image is in GCS bucket, downloading for analysis...")
+        
+        # Parse GCS URI
+        bucket_name, blob_path = gcp_utils.parse_gcs_uri(image_path)
+        
+        # Create cache directory
+        os.makedirs(cache_dir, exist_ok=True)
+        
+        # Extract filename from blob path
+        filename = os.path.basename(blob_path)
+        local_cache_path = os.path.join(cache_dir, filename)
+        
+        # Download if not already cached
+        if not os.path.exists(local_cache_path):
+            gcp_utils.download_image_from_bucket(
+                bucket_name=bucket_name,
+                blob_path=blob_path,
+                local_path=local_cache_path
+            )
+        else:
+            print(f"Using cached image: {local_cache_path}")
+        
+        return local_cache_path
+    
+    # Otherwise, it's a local path - verify it exists
+    if not os.path.exists(image_path):
+        raise FileNotFoundError(f"Image file not found: {image_path}")
+    
+    return image_path
 
 
 def load_gemini_api_key():
@@ -58,9 +111,8 @@ def analyze_image_with_gemini(image_path):
         FileNotFoundError: If image file doesn't exist
     """
     try:
-        # Check if image exists
-        if not os.path.exists(image_path):
-            raise FileNotFoundError(f"Image file not found: {image_path}")
+        # Ensure image is available locally (download from GCS if needed)
+        local_image_path = ensure_local_image(image_path)
         
         # Load API key and configure Gemini
         api_key = load_gemini_api_key()
@@ -69,15 +121,15 @@ def analyze_image_with_gemini(image_path):
         client = genai.Client(api_key=api_key)
         
         # Load the image
-        print(f"Loading image for Gemini analysis: {image_path}")
+        print(f"Loading image for Gemini analysis: {local_image_path}")
         
         # Read image file and convert to base64 (required for new API)
         import base64
-        with open(image_path, 'rb') as image_file:
+        with open(local_image_path, 'rb') as image_file:
             image_data = base64.b64encode(image_file.read()).decode('utf-8')
         
         # Determine mime type based on file extension
-        file_ext = os.path.splitext(image_path)[1].lower()
+        file_ext = os.path.splitext(local_image_path)[1].lower()
         mime_type = 'image/tiff' if file_ext == '.tif' else 'image/jpeg'
         
         # WWTP analysis prompt

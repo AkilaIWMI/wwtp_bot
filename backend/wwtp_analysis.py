@@ -15,6 +15,12 @@ import leafmap
 from ultralytics import YOLO
 from PIL import Image
 
+# Import GCP utilities for bucket operations
+try:
+    from . import gcp_utils  # When used as module
+except ImportError:
+    import gcp_utils  # When run as standalone script
+
 
 # ============================================
 # HARDCODED PARAMETERS - EDIT THESE VALUES
@@ -504,7 +510,9 @@ def analyze_wwtp(lat, lon, output_dir="Data"):
         print("STEP 1: Downloading Satellite Image")
         print(f"{'='*80}")
         
-        satellite_image_path = os.path.join(output_dir, f"satellite_{lat}_{lon}.tif")
+        # Generate timestamp for unique filename
+        timestamp = gcp_utils.generate_timestamp()
+        satellite_image_path = os.path.join(output_dir, f"satellite_{lat}_{lon}_{timestamp}.tif")
         
         download_satellite_image(
             lat=lat,
@@ -513,6 +521,25 @@ def analyze_wwtp(lat, lon, output_dir="Data"):
             bbox_size=BBOX_SIZE,
             zoom=ZOOM_LEVEL
         )
+        
+        # Upload satellite image to GCP bucket
+        try:
+            bucket_name = os.getenv("GCP_BUCKET_NAME", "bot-dump")
+            bucket_path = os.getenv("GCP_BUCKET_PATH", "meta_data")
+            
+            # Construct blob path: meta_data/satellite_LAT_LON_TIMESTAMP.tif
+            blob_path = f"{bucket_path}/satellite_{lat}_{lon}_{timestamp}.tif"
+            
+            print(f"\nUploading satellite image to GCP bucket...")
+            satellite_gcs_uri = gcp_utils.upload_image_to_bucket(
+                local_path=satellite_image_path,
+                bucket_name=bucket_name,
+                blob_path=blob_path
+            )
+            print(f"✓ Satellite image uploaded: {satellite_gcs_uri}")
+        except Exception as e:
+            print(f"✗ Failed to upload satellite image to bucket: {str(e)}")
+            satellite_gcs_uri = None
         
         # Step 2: Check if model exists
         print(f"\n{'='*80}")
@@ -528,6 +555,8 @@ def analyze_wwtp(lat, lon, output_dir="Data"):
                 'detection_counts': {},
                 'annotated_image_path': None,
                 'satellite_image_path': satellite_image_path,
+                'satellite_gcs_uri': satellite_gcs_uri,
+                'annotated_gcs_uri': None,
                 'error': f"Model file not found at {MODEL_PATH}"
             }
         
@@ -552,8 +581,24 @@ def analyze_wwtp(lat, lon, output_dir="Data"):
         print("STEP 5: Saving Results")
         print(f"{'='*80}")
         
-        output_path = os.path.join(output_dir, f"annotated_{lat}_{lon}.jpg")
+        output_path = os.path.join(output_dir, f"annotated_{lat}_{lon}_{timestamp}.jpg")
         save_image(annotated_image, output_path)
+        
+        # Upload annotated image to GCP bucket
+        try:
+            # Construct blob path: meta_data/annotated_LAT_LON_TIMESTAMP.jpg
+            annotated_blob_path = f"{bucket_path}/annotated_{lat}_{lon}_{timestamp}.jpg"
+            
+            print(f"\nUploading annotated image to GCP bucket...")
+            annotated_gcs_uri = gcp_utils.upload_image_to_bucket(
+                local_path=output_path,
+                bucket_name=bucket_name,
+                blob_path=annotated_blob_path
+            )
+            print(f"✓ Annotated image uploaded: {annotated_gcs_uri}")
+        except Exception as e:
+            print(f"✗ Failed to upload annotated image to bucket: {str(e)}")
+            annotated_gcs_uri = None
         
         # Calculate detection counts
         detection_counts = {}
@@ -579,6 +624,8 @@ def analyze_wwtp(lat, lon, output_dir="Data"):
             'detection_counts': detection_counts,
             'annotated_image_path': output_path,
             'satellite_image_path': satellite_image_path,
+            'satellite_gcs_uri': satellite_gcs_uri,  # GCS URI for satellite image
+            'annotated_gcs_uri': annotated_gcs_uri,  # GCS URI for annotated image
             'error': None
         }
         
@@ -595,86 +642,60 @@ def analyze_wwtp(lat, lon, output_dir="Data"):
             'detection_counts': {},
             'annotated_image_path': None,
             'satellite_image_path': None,
+            'satellite_gcs_uri': None,
+            'annotated_gcs_uri': None,
             'error': str(e)
         }
 
 
 def main():
     """
-    Main function to run complete WWTP analysis pipeline:
-    1. Download satellite image from hardcoded coordinates
-    2. Run YOLO inference
-    3. Calculate radius for circular tanks
-    4. Save annotated image
+    Main function to run complete WWTP analysis pipeline with GCP upload.
+    Uses the analyze_wwtp() function which includes GCP bucket integration.
     """
     print("=" * 80)
     print("WWTP SATELLITE ANALYSIS PIPELINE")
     print("=" * 80)
     
-    # Create output directory if it doesn't exist
-    if not os.path.exists(OUTPUT_DIR):
-        os.makedirs(OUTPUT_DIR)
-        print(f"Created directory: {OUTPUT_DIR}")
-    
-    # Step 1: Download satellite image
-    print("\n" + "=" * 80)
-    print("STEP 1: Downloading Satellite Image")
-    print("=" * 80)
-    
-    satellite_image_path = os.path.join(OUTPUT_DIR, "satellite_image.tif")
-    
-    download_satellite_image(
+    # Use analyze_wwtp() function which includes GCP upload
+    result = analyze_wwtp(
         lat=CENTER_LAT,
         lon=CENTER_LON,
-        output_path=satellite_image_path,
-        bbox_size=BBOX_SIZE,
-        zoom=ZOOM_LEVEL
+        output_dir=OUTPUT_DIR
     )
     
-    # Step 2: Check if model exists
-    print("\n" + "=" * 80)
-    print("STEP 2: Loading YOLO Model")
-    print("=" * 80)
+    # Print results
+    if result['success']:
+        print("\n" + "=" * 80)
+        print("ANALYSIS COMPLETED SUCCESSFULLY!")
+        print("=" * 80)
+        print(f"\nLocal files:")
+        print(f"  - Satellite image: {result['satellite_image_path']}")
+        print(f"  - Annotated image: {result['annotated_image_path']}")
+        
+        if result['satellite_gcs_uri']:
+            print(f"\nGCS Bucket uploads:")
+            print(f"  - Satellite image: {result['satellite_gcs_uri']}")
+            print(f"  - Annotated image: {result['annotated_gcs_uri']}")
+        else:
+            print(f"\n⚠️ GCS upload failed (images saved locally only)")
+        
+        print(f"\nDetection summary:")
+        print(f"  - WWTP detected: {result['wwtp_detected']}")
+        print(f"  - Circular tanks: {len(result['circular_tanks'])}")
+        print(f"  - Total detections: {len(result['all_detections'])}")
+        
+        if result['detection_counts']:
+            print(f"\nDetection counts:")
+            for class_name, count in result['detection_counts'].items():
+                print(f"  - {class_name}: {count}")
+    else:
+        print("\n" + "=" * 80)
+        print("ANALYSIS FAILED!")
+        print("=" * 80)
+        print(f"Error: {result['error']}")
     
-    if not MODEL_PATH.exists():
-        print(f"Error: Model file not found at {MODEL_PATH}")
-        return
-    
-    # Step 3: Run YOLO inference
-    print("\n" + "=" * 80)
-    print("STEP 3: Running YOLO Inference")
-    print("=" * 80)
-    
-    image, results = run_yolo_inference(MODEL_PATH, satellite_image_path, conf_threshold=CONF_THRESHOLD)
-    
-    # Step 4: Draw predictions and calculate measurements
-    print("\n" + "=" * 80)
-    print("STEP 4: Calculating Measurements")
-    print("=" * 80)
-    
-    annotated_image, circular_tank_data, all_detections = draw_predictions(
-        image, results, CLASS_NAMES, CLASS_COLORS, satellite_image_path, BBOX_SIZE
-    )
-    
-    # Step 5: Save annotated image
-    print("\n" + "=" * 80)
-    print("STEP 5: Saving Results")
-    print("=" * 80)
-    
-    output_path = os.path.join(OUTPUT_DIR, "satellite_image_annotated.jpg")
-    save_image(annotated_image, output_path)
-    
-    # Print summary of circular tanks
-    print_summary(circular_tank_data)
-    
-    print("\n" + "=" * 80)
-    print("PIPELINE COMPLETED SUCCESSFULLY!")
-    print("=" * 80)
-    print(f"\nResults saved to:")
-    print(f"  - Original image: {satellite_image_path}")
-    print(f"  - Annotated image: {output_path}")
-    
-    return circular_tank_data
+    return result
 
 
 if __name__ == "__main__":
