@@ -557,6 +557,7 @@ def analyze_wwtp(lat, lon, output_dir="Data"):
                 'satellite_image_path': satellite_image_path,
                 'satellite_gcs_uri': satellite_gcs_uri,
                 'annotated_gcs_uri': None,
+                'annotated_public_url': None,
                 'error': f"Model file not found at {MODEL_PATH}"
             }
         
@@ -585,6 +586,7 @@ def analyze_wwtp(lat, lon, output_dir="Data"):
         save_image(annotated_image, output_path)
         
         # Upload annotated image to GCP bucket
+        annotated_public_url = None
         try:
             # Construct blob path: meta_data/annotated_LAT_LON_TIMESTAMP.jpg
             annotated_blob_path = f"{bucket_path}/annotated_{lat}_{lon}_{timestamp}.jpg"
@@ -596,6 +598,15 @@ def analyze_wwtp(lat, lon, output_dir="Data"):
                 blob_path=annotated_blob_path
             )
             print(f"✓ Annotated image uploaded: {annotated_gcs_uri}")
+            
+            # Generate public URL for Twilio WhatsApp media
+            print(f"\nGenerating public URL for annotated image...")
+            annotated_public_url = gcp_utils.get_public_url_for_blob(
+                bucket_name=bucket_name,
+                blob_path=annotated_blob_path,
+                expiration_minutes=60
+            )
+            print(f"✓ Public URL generated (expires in 60 minutes)")
         except Exception as e:
             print(f"✗ Failed to upload annotated image to bucket: {str(e)}")
             annotated_gcs_uri = None
@@ -626,6 +637,7 @@ def analyze_wwtp(lat, lon, output_dir="Data"):
             'satellite_image_path': satellite_image_path,
             'satellite_gcs_uri': satellite_gcs_uri,  # GCS URI for satellite image
             'annotated_gcs_uri': annotated_gcs_uri,  # GCS URI for annotated image
+            'annotated_public_url': annotated_public_url,  # Public URL for Twilio WhatsApp
             'error': None
         }
         
@@ -644,6 +656,7 @@ def analyze_wwtp(lat, lon, output_dir="Data"):
             'satellite_image_path': None,
             'satellite_gcs_uri': None,
             'annotated_gcs_uri': None,
+            'annotated_public_url': None,
             'error': str(e)
         }
 
@@ -700,3 +713,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    

@@ -375,8 +375,20 @@ async def whatsapp_webhook(request: Request, Body: str = Form(""), Latitude: str
                 'timestamp': time.time()
             }
             
-            # Send detection message (already created above)
-            resp.message(detection_message)
+            # Get public URL for annotated image
+            annotated_public_url = results.get('annotated_public_url')
+            
+            if annotated_public_url:
+                # Send message WITH media (annotated image)
+                msg = resp.message(detection_message)
+                msg.media(annotated_public_url)
+                print(f"✓ Sending detection message with annotated image")
+                print(f"  Media URL: {annotated_public_url}")
+            else:
+                # Fallback: send text only if URL not available
+                resp.message(detection_message)
+                print(f"⚠️ No public URL available, sending text-only message")
+            
             return Response(content=str(resp), media_type="application/xml")
             
         except Exception as e:
@@ -496,8 +508,20 @@ async def whatsapp_webhook(request: Request, Body: str = Form(""), Latitude: str
                 'timestamp': time.time()
             }
             
-            # Send detection message (already created above)
-            resp.message(detection_message)
+            # Get public URL for annotated image
+            annotated_public_url = results.get('annotated_public_url')
+            
+            if annotated_public_url:
+                # Send message WITH media (annotated image)
+                msg = resp.message(detection_message)
+                msg.media(annotated_public_url)
+                print(f"✓ Sending detection message with annotated image")
+                print(f"  Media URL: {annotated_public_url}")
+            else:
+                # Fallback: send text only if URL not available
+                resp.message(detection_message)
+                print(f"⚠️ No public URL available, sending text-only message")
+            
             return Response(content=str(resp), media_type="application/xml")
             
         except Exception as e:
@@ -552,3 +576,7 @@ if __name__ == "__main__":
     
     # Running on port 5000 to match ngrok setup
     uvicorn.run(app, host="0.0.0.0", port=5000)
+
+
+
+

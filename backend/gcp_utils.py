@@ -195,6 +195,62 @@ def get_bucket_image_url(bucket_name: str, blob_path: str) -> str:
     return f"gs://{bucket_name}/{blob_path}"
 
 
+def get_public_url_for_blob(
+    bucket_name: str, 
+    blob_path: str, 
+    expiration_minutes: int = 60
+) -> str:
+    """
+    Generate a signed URL for temporary public access to a GCS blob.
+    
+    This is required for Twilio WhatsApp media messages, which need publicly
+    accessible HTTPS URLs. The signed URL provides temporary access without
+    making the entire bucket public.
+    
+    Args:
+        bucket_name: Name of GCS bucket (e.g., "bot-dump")
+        blob_path: Path to blob in bucket (e.g., "meta_data/image.jpg")
+        expiration_minutes: Minutes until URL expires (default: 60)
+        
+    Returns:
+        str: HTTPS signed URL for temporary public access
+        
+    Raises:
+        Exception: If URL generation fails
+    """
+    try:
+        # Initialize client
+        client = initialize_gcs_client()
+        
+        # Get bucket and blob
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(blob_path)
+        
+        # Check if blob exists
+        if not blob.exists():
+            raise FileNotFoundError(
+                f"Blob not found in bucket: gs://{bucket_name}/{blob_path}"
+            )
+        
+        # Generate signed URL with expiration
+        from datetime import timedelta
+        
+        url = blob.generate_signed_url(
+            version="v4",
+            expiration=timedelta(minutes=expiration_minutes),
+            method="GET"
+        )
+        
+        print(f"✓ Generated public URL (expires in {expiration_minutes} min)")
+        print(f"  Blob: gs://{bucket_name}/{blob_path}")
+        
+        return url
+        
+    except Exception as e:
+        print(f"✗ Failed to generate public URL: {str(e)}")
+        raise
+
+
 def list_bucket_images(
     bucket_name: str,
     prefix: str = "",
