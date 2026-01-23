@@ -1,0 +1,39 @@
+# Core dependencies for WWTP WhatsApp Bot
+
+# Web Framework
+fastapi>=0.104.0
+uvicorn>=0.24.0
+python-multipart>=0.0.6
+
+# Twilio for WhatsApp integration
+twilio>=8.10.0
+
+# Computer Vision and ML
+opencv-python>=4.8.0
+ultralytics>=8.0.0
+Pillow>=10.0.0
+
+# Geospatial and Mapping
+leafmap>=0.28.0
+
+# Scientific Computing
+numpy>=1.24.0
+
+# File handling
+pathlib2>=2.3.7
+
+# Environment variables
+python-dotenv>=1.0.0
+
+# Google Gemini AI (new package)
+google-genai>=0.2.0
+
+# Google Cloud Storage
+google-cloud-storage>=2.10.0
+
+# Excel file handling
+pandas>=2.0.0
+openpyxl>=3.1.0
+
+# HTTP requests (for Twilio media downloads)
+requests>=2.31.0

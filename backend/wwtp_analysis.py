@@ -7,12 +7,19 @@ and calculates real-world measurements for circular wastewater treatment tanks.
 import os
 import math
 import time
+import traceback
 from pathlib import Path
 import cv2
 import numpy as np
 import leafmap
 from ultralytics import YOLO
 from PIL import Image
+
+# Import GCP utilities for bucket operations
+try:
+    from . import gcp_utils  # When used as module
+except ImportError:
+    import gcp_utils  # When run as standalone script
 
 
 # ============================================
@@ -103,18 +110,27 @@ def download_satellite_image(lat, lon, output_path, bbox_size=100, zoom=19, sour
     # Calculate bounding box
     bbox = calculate_bbox(lat, lon, bbox_size)
     
+    # Debug: Print bbox details
+    print(f"  DEBUG: Calculated bbox for lat={lat}, lon={lon}, size={bbox_size}m")
+    print(f"  DEBUG: bbox = {bbox}")
+    
     retry_count = 0
     
     while retry_count < max_retries:
         try:
             # Download the image with the specified bounding box and zoom level
+            print(f"  Attempting to download satellite image with leafmap...")
+            print(f"  Output path: {output_path}")
+            print(f"  Bbox: {bbox}")
+            print(f"  Zoom: {zoom}, Source: {source}")
+            
             leafmap.tms_to_geotiff(
                 output=output_path, 
                 bbox=bbox, 
                 zoom=zoom, 
                 source=source, 
                 overwrite=True, 
-                quiet=True
+                quiet=False  # Changed to False to see any error messages
             )
             print(f"✓ Image successfully downloaded to: {output_path}")
             print(f"  Center: ({lat}, {lon})")
@@ -123,7 +139,13 @@ def download_satellite_image(lat, lon, output_path, bbox_size=100, zoom=19, sour
             return True
             
         except Exception as e:
-            print(f"✗ Attempt {retry_count + 1} failed: {str(e)}")
+            error_type = type(e).__name__
+            error_msg = str(e) if str(e) else "(no error message)"
+            print(f"✗ Attempt {retry_count + 1} failed:")
+            print(f"  Error Type: {error_type}")
+            print(f"  Error Message: {error_msg}")
+            print(f"  Traceback:")
+            traceback.print_exc()
             retry_count += 1
             
             if retry_count < max_retries:
@@ -132,6 +154,7 @@ def download_satellite_image(lat, lon, output_path, bbox_size=100, zoom=19, sour
                 time.sleep(sleep_time)
             else:
                 print(f"✗ Failed after {max_retries} attempts.")
+                print(f"  Final error: {error_type}: {error_msg}")
                 raise
     
     return False
@@ -210,9 +233,14 @@ def get_real_world_radius(image_path, detection_box, bbox_coverage_meters=250):
     center_x = (xmin + xmax) / 2.0
     center_y = (ymin + ymax) / 2.0
     
+    # Calculate surface area (π × r²)
+    import math
+    surface_area = math.pi * (radius_meters ** 2)
+    
     return {
         'radius_meters': round(radius_meters, 2),
         'diameter_meters': round(diameter_meters, 2),
+        'surface_area_sqm': round(surface_area, 2),
         'diameter_pixels': round(diameter_pixels, 2),
         'meters_per_pixel': round(meters_per_pixel, 4),
         'center_x': round(center_x, 2),
@@ -258,10 +286,11 @@ def draw_predictions(image, results, class_names, class_colors, image_path, bbox
         bbox_coverage_meters: Real-world coverage in meters
         
     Returns:
-        tuple: (annotated_image, circular_tank_data)
+        tuple: (annotated_image, circular_tank_data, all_detections)
     """
     annotated_image = image.copy()
     circular_tank_data = []
+    all_detections = []
     
     # Get the first result (single image inference)
     result = results[0]
@@ -273,6 +302,9 @@ def draw_predictions(image, results, class_names, class_colors, image_path, bbox
     
     print(f"\nDetected {len(boxes)} objects:")
     print("=" * 80)
+    
+    # Track circular tank IDs separately for unique numbering
+    circular_tank_counter = 0
     
     # Draw each detection
     for i, (box, conf, cls_id) in enumerate(zip(boxes, confidences, class_ids)):
@@ -286,22 +318,31 @@ def draw_predictions(image, results, class_names, class_colors, image_path, bbox
         print(f"  Confidence: {conf:.2f}")
         print(f"  Bounding Box: ({x1}, {y1}, {x2}, {y2})")
         
+        # Store detection info for all objects
+        detection_info = {
+            'object_id': i + 1,
+            'class_name': class_name,
+            'class_id': int(cls_id),
+            'confidence': float(conf),
+            'bounding_box': [int(x1), int(y1), int(x2), int(y2)]
+        }
+        
         # Calculate real-world radius for circular tanks
         if cls_id == 0:  # Circular-Tank
+            circular_tank_counter += 1
+            tank_id = circular_tank_counter
+            
             measurements = get_real_world_radius(
                 image_path, 
                 [x1, y1, x2, y2], 
                 bbox_coverage_meters
             )
             
-            circular_tank_data.append({
-                'object_id': i + 1,
-                'class_name': class_name,
-                'confidence': conf,
-                'bounding_box': [x1, y1, x2, y2],
-                'measurements': measurements
-            })
+            detection_info['measurements'] = measurements
+            detection_info['tank_id'] = tank_id  # Add unique tank ID
+            circular_tank_data.append(detection_info)
             
+            print(f"  Tank ID: {tank_id}")
             print(f"  Real-World Measurements:")
             print(f"    - Radius: {measurements['radius_meters']} meters")
             print(f"    - Diameter: {measurements['diameter_meters']} meters")
@@ -314,10 +355,49 @@ def draw_predictions(image, results, class_names, class_colors, image_path, bbox
             cv2.circle(annotated_image, (center_x, center_y), 5, color, -1)
             cv2.circle(annotated_image, (center_x, center_y), 8, (255, 255, 255), 2)
             
+            # Draw large unique ID number on the tank
+            id_text = f"#{tank_id}"
+            id_font_scale = 1.5
+            id_thickness = 3
+            
+            # Get ID text size for positioning
+            (id_width, id_height), id_baseline = cv2.getTextSize(
+                id_text, cv2.FONT_HERSHEY_DUPLEX, id_font_scale, id_thickness
+            )
+            
+            # Position ID at top-left corner of bounding box, slightly inside
+            id_x = x1 + 10
+            id_y = y1 + id_height + 15
+            
+            # Draw black outline for better visibility
+            cv2.putText(
+                annotated_image,
+                id_text,
+                (id_x, id_y),
+                cv2.FONT_HERSHEY_DUPLEX,
+                id_font_scale,
+                (0, 0, 0),  # Black outline
+                id_thickness + 2
+            )
+            
+            # Draw white ID text
+            cv2.putText(
+                annotated_image,
+                id_text,
+                (id_x, id_y),
+                cv2.FONT_HERSHEY_DUPLEX,
+                id_font_scale,
+                (255, 255, 255),  # White text
+                id_thickness
+            )
+            
             # Create enhanced label with radius
             label = f"{class_name}: {conf:.2f} | R={measurements['radius_meters']}m"
         else:
             label = f"{class_name}: {conf:.2f}"
+        
+        # Add to all detections list
+        all_detections.append(detection_info)
         
         # Draw bounding box
         cv2.rectangle(annotated_image, (x1, y1), (x2, y2), color, 2)
@@ -347,7 +427,8 @@ def draw_predictions(image, results, class_names, class_colors, image_path, bbox
             2
         )
     
-    return annotated_image, circular_tank_data
+    return annotated_image, circular_tank_data, all_detections
+
 
 
 def save_image(image, output_path):
@@ -392,83 +473,244 @@ def print_summary(circular_tank_data):
     print("\n" + "=" * 80)
 
 
+def analyze_wwtp(lat, lon, output_dir="Data"):
+    """
+    Analyze WWTP from satellite imagery at given coordinates.
+    
+    This function orchestrates the complete pipeline:
+    1. Download satellite image
+    2. Run YOLO inference
+    3. Calculate measurements for circular tanks
+    4. Save annotated image
+    
+    Args:
+        lat (float): Latitude coordinate
+        lon (float): Longitude coordinate
+        output_dir (str): Directory to save images (default: "Data")
+        
+    Returns:
+        dict: Results dictionary containing:
+            - success (bool): Whether analysis completed successfully
+            - wwtp_detected (bool): Whether any WWTP-related objects were detected
+            - circular_tanks (list): List of circular tank data with measurements
+            - all_detections (list): All detected objects
+            - detection_counts (dict): Count of each class detected
+            - annotated_image_path (str): Path to annotated image
+            - satellite_image_path (str): Path to original satellite image
+            - error (str): Error message if failed
+    """
+    try:
+        # Create output directory if it doesn't exist
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+            print(f"Created directory: {output_dir}")
+        
+        # Step 1: Download satellite image
+        print(f"\n{'='*80}")
+        print("STEP 1: Downloading Satellite Image")
+        print(f"{'='*80}")
+        
+        # Generate timestamp for unique filename
+        timestamp = gcp_utils.generate_timestamp()
+        satellite_image_path = os.path.join(output_dir, f"satellite_{lat}_{lon}_{timestamp}.tif")
+        
+        download_satellite_image(
+            lat=lat,
+            lon=lon,
+            output_path=satellite_image_path,
+            bbox_size=BBOX_SIZE,
+            zoom=ZOOM_LEVEL
+        )
+        
+        # Upload satellite image to GCP bucket
+        try:
+            bucket_name = os.getenv("GCP_BUCKET_NAME", "bot-dump")
+            bucket_path = os.getenv("GCP_BUCKET_PATH", "meta_data")
+            
+            # Construct blob path: meta_data/satellite_LAT_LON_TIMESTAMP.tif
+            blob_path = f"{bucket_path}/satellite_{lat}_{lon}_{timestamp}.tif"
+            
+            print(f"\nUploading satellite image to GCP bucket...")
+            satellite_gcs_uri = gcp_utils.upload_image_to_bucket(
+                local_path=satellite_image_path,
+                bucket_name=bucket_name,
+                blob_path=blob_path
+            )
+            print(f"✓ Satellite image uploaded: {satellite_gcs_uri}")
+        except Exception as e:
+            print(f"✗ Failed to upload satellite image to bucket: {str(e)}")
+            satellite_gcs_uri = None
+        
+        # Step 2: Check if model exists
+        print(f"\n{'='*80}")
+        print("STEP 2: Loading YOLO Model")
+        print(f"{'='*80}")
+        
+        if not MODEL_PATH.exists():
+            return {
+                'success': False,
+                'wwtp_detected': False,
+                'circular_tanks': [],
+                'all_detections': [],
+                'detection_counts': {},
+                'annotated_image_path': None,
+                'satellite_image_path': satellite_image_path,
+                'satellite_gcs_uri': satellite_gcs_uri,
+                'annotated_gcs_uri': None,
+                'annotated_public_url': None,
+                'error': f"Model file not found at {MODEL_PATH}"
+            }
+        
+        # Step 3: Run YOLO inference
+        print(f"\n{'='*80}")
+        print("STEP 3: Running YOLO Inference")
+        print(f"{'='*80}")
+        
+        image, results = run_yolo_inference(MODEL_PATH, satellite_image_path, conf_threshold=CONF_THRESHOLD)
+        
+        # Step 4: Draw predictions and calculate measurements
+        print(f"\n{'='*80}")
+        print("STEP 4: Calculating Measurements")
+        print(f"{'='*80}")
+        
+        annotated_image, circular_tank_data, all_detections = draw_predictions(
+            image, results, CLASS_NAMES, CLASS_COLORS, satellite_image_path, BBOX_SIZE
+        )
+        
+        # Step 5: Save annotated image
+        print(f"\n{'='*80}")
+        print("STEP 5: Saving Results")
+        print(f"{'='*80}")
+        
+        output_path = os.path.join(output_dir, f"annotated_{lat}_{lon}_{timestamp}.jpg")
+        save_image(annotated_image, output_path)
+        
+        # Upload annotated image to GCP bucket
+        annotated_public_url = None
+        try:
+            # Construct blob path: meta_data/annotated_LAT_LON_TIMESTAMP.jpg
+            annotated_blob_path = f"{bucket_path}/annotated_{lat}_{lon}_{timestamp}.jpg"
+            
+            print(f"\nUploading annotated image to GCP bucket...")
+            annotated_gcs_uri = gcp_utils.upload_image_to_bucket(
+                local_path=output_path,
+                bucket_name=bucket_name,
+                blob_path=annotated_blob_path
+            )
+            print(f"✓ Annotated image uploaded: {annotated_gcs_uri}")
+            
+            # Generate public URL for Twilio WhatsApp media
+            print(f"\nGenerating public URL for annotated image...")
+            annotated_public_url = gcp_utils.get_public_url_for_blob(
+                bucket_name=bucket_name,
+                blob_path=annotated_blob_path,
+                expiration_minutes=60
+            )
+            print(f"✓ Public URL generated (expires in 60 minutes)")
+        except Exception as e:
+            print(f"✗ Failed to upload annotated image to bucket: {str(e)}")
+            annotated_gcs_uri = None
+        
+        # Calculate detection counts
+        detection_counts = {}
+        for detection in all_detections:
+            class_name = detection['class_name']
+            detection_counts[class_name] = detection_counts.get(class_name, 0) + 1
+        
+        # Check if WWTP was detected
+        wwtp_detected = any(d['class_name'] == 'WWTP' for d in all_detections)
+        
+        # Print summary
+        print_summary(circular_tank_data)
+        
+        print(f"\n{'='*80}")
+        print("ANALYSIS COMPLETED SUCCESSFULLY!")
+        print(f"{'='*80}")
+        
+        return {
+            'success': True,
+            'wwtp_detected': wwtp_detected,
+            'circular_tanks': circular_tank_data,
+            'all_detections': all_detections,
+            'detection_counts': detection_counts,
+            'annotated_image_path': output_path,
+            'satellite_image_path': satellite_image_path,
+            'satellite_gcs_uri': satellite_gcs_uri,  # GCS URI for satellite image
+            'annotated_gcs_uri': annotated_gcs_uri,  # GCS URI for annotated image
+            'annotated_public_url': annotated_public_url,  # Public URL for Twilio WhatsApp
+            'error': None
+        }
+        
+    except Exception as e:
+        print(f"\n{'='*80}")
+        print(f"ERROR: Analysis failed - {str(e)}")
+        print(f"{'='*80}")
+        
+        return {
+            'success': False,
+            'wwtp_detected': False,
+            'circular_tanks': [],
+            'all_detections': [],
+            'detection_counts': {},
+            'annotated_image_path': None,
+            'satellite_image_path': None,
+            'satellite_gcs_uri': None,
+            'annotated_gcs_uri': None,
+            'annotated_public_url': None,
+            'error': str(e)
+        }
+
+
 def main():
     """
-    Main function to run complete WWTP analysis pipeline:
-    1. Download satellite image from hardcoded coordinates
-    2. Run YOLO inference
-    3. Calculate radius for circular tanks
-    4. Save annotated image
+    Main function to run complete WWTP analysis pipeline with GCP upload.
+    Uses the analyze_wwtp() function which includes GCP bucket integration.
     """
     print("=" * 80)
     print("WWTP SATELLITE ANALYSIS PIPELINE")
     print("=" * 80)
     
-    # Create output directory if it doesn't exist
-    if not os.path.exists(OUTPUT_DIR):
-        os.makedirs(OUTPUT_DIR)
-        print(f"Created directory: {OUTPUT_DIR}")
-    
-    # Step 1: Download satellite image
-    print("\n" + "=" * 80)
-    print("STEP 1: Downloading Satellite Image")
-    print("=" * 80)
-    
-    satellite_image_path = os.path.join(OUTPUT_DIR, "satellite_image.tif")
-    
-    download_satellite_image(
+    # Use analyze_wwtp() function which includes GCP upload
+    result = analyze_wwtp(
         lat=CENTER_LAT,
         lon=CENTER_LON,
-        output_path=satellite_image_path,
-        bbox_size=BBOX_SIZE,
-        zoom=ZOOM_LEVEL
+        output_dir=OUTPUT_DIR
     )
     
-    # Step 2: Check if model exists
-    print("\n" + "=" * 80)
-    print("STEP 2: Loading YOLO Model")
-    print("=" * 80)
+    # Print results
+    if result['success']:
+        print("\n" + "=" * 80)
+        print("ANALYSIS COMPLETED SUCCESSFULLY!")
+        print("=" * 80)
+        print(f"\nLocal files:")
+        print(f"  - Satellite image: {result['satellite_image_path']}")
+        print(f"  - Annotated image: {result['annotated_image_path']}")
+        
+        if result['satellite_gcs_uri']:
+            print(f"\nGCS Bucket uploads:")
+            print(f"  - Satellite image: {result['satellite_gcs_uri']}")
+            print(f"  - Annotated image: {result['annotated_gcs_uri']}")
+        else:
+            print(f"\n⚠️ GCS upload failed (images saved locally only)")
+        
+        print(f"\nDetection summary:")
+        print(f"  - WWTP detected: {result['wwtp_detected']}")
+        print(f"  - Circular tanks: {len(result['circular_tanks'])}")
+        print(f"  - Total detections: {len(result['all_detections'])}")
+        
+        if result['detection_counts']:
+            print(f"\nDetection counts:")
+            for class_name, count in result['detection_counts'].items():
+                print(f"  - {class_name}: {count}")
+    else:
+        print("\n" + "=" * 80)
+        print("ANALYSIS FAILED!")
+        print("=" * 80)
+        print(f"Error: {result['error']}")
     
-    if not MODEL_PATH.exists():
-        print(f"Error: Model file not found at {MODEL_PATH}")
-        return
-    
-    # Step 3: Run YOLO inference
-    print("\n" + "=" * 80)
-    print("STEP 3: Running YOLO Inference")
-    print("=" * 80)
-    
-    image, results = run_yolo_inference(MODEL_PATH, satellite_image_path, conf_threshold=CONF_THRESHOLD)
-    
-    # Step 4: Draw predictions and calculate measurements
-    print("\n" + "=" * 80)
-    print("STEP 4: Calculating Measurements")
-    print("=" * 80)
-    
-    annotated_image, circular_tank_data = draw_predictions(
-        image, results, CLASS_NAMES, CLASS_COLORS, satellite_image_path, BBOX_SIZE
-    )
-    
-    # Step 5: Save annotated image
-    print("\n" + "=" * 80)
-    print("STEP 5: Saving Results")
-    print("=" * 80)
-    
-    output_path = os.path.join(OUTPUT_DIR, "satellite_image_annotated.jpg")
-    save_image(annotated_image, output_path)
-    
-    # Print summary of circular tanks
-    print_summary(circular_tank_data)
-    
-    print("\n" + "=" * 80)
-    print("PIPELINE COMPLETED SUCCESSFULLY!")
-    print("=" * 80)
-    print(f"\nResults saved to:")
-    print(f"  - Original image: {satellite_image_path}")
-    print(f"  - Annotated image: {output_path}")
-    
-    return circular_tank_data
+    return result
 
 
 if __name__ == "__main__":
     main()
+    

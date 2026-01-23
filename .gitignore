@@ -136,6 +136,7 @@ celerybeat.pid
 
 # Environments
 .env
+.env.example
 .envrc
 .venv
 env/
@@ -208,3 +209,15 @@ __marimo__/
 
 # Custom
 model/
+backend/Data/
+
+TESTING.md
+
+
+config/
+
+
+Cal_area_Geodesic.py
+
+IMPLEMENTATION_SUMMARY.md
+GCP_SETUP.md
