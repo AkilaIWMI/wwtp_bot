@@ -59,7 +59,6 @@ RUN useradd -m -u 1000 -s /bin/bash appuser
 WORKDIR /app
  
 COPY backend/ /app/backend/
-COPY model/ /app/model/
  
 RUN mkdir -p /app/backend/Data /app/config && \
     chown -R appuser:appuser /app
@@ -73,3 +72,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
  
 WORKDIR /app/backend
 CMD ["uvicorn", "whatsapp_bot:app", "--host", "0.0.0.0", "--port", "5000"]
+
