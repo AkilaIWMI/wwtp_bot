@@ -15,11 +15,14 @@ import re
 import time
 import math
 import uvicorn
+from pathlib import Path
 from fastapi import FastAPI, Form, Response, Request
 from twilio.twiml.messaging_response import MessagingResponse
 from wwtp_analysis import analyze_wwtp
 from gemini_analysis import analyze_image_with_gemini
 from excel_utils import save_and_upload_tank_data
+from image_utils import download_image_from_twilio, get_twilio_credentials
+from image_storage import process_user_image_upload, save_location_images_metadata, upload_location_metadata_to_gcp
 
 app = FastAPI()
 
@@ -34,12 +37,30 @@ app = FastAPI()
 #     'current_tank_index': int,
 #     'annotated_image_path': str,
 #     'satellite_image_path': str,
-#     'timestamp': float
+#     'timestamp': float,
+#     'state': str ('collecting_heights' | 'awaiting_images' | 'complete'),
+#     'submission_id': str (unique ID for this submission),
+#     'timestamp_str': str (formatted timestamp YYYYMMDD_HHMMSS),
+#     'uploaded_images': list (image upload metadata),
+#     'image_count': int (number of images uploaded),
+#     'last_activity': float (timestamp of last image activity),
+#     'gcp_upload_failed': bool (track if any GCP upload failed)
 # }
 user_sessions = {}
 
 # Session timeout: 30 minutes
 SESSION_TIMEOUT = 1800
+
+# Image collection timeout: 5 minutes
+IMAGE_COLLECTION_TIMEOUT = 300
+
+# Required number of images
+REQUIRED_IMAGE_COUNT = 3
+
+# Session states
+STATE_COLLECTING_HEIGHTS = 'collecting_heights'
+STATE_AWAITING_IMAGES = 'awaiting_images'
+STATE_COMPLETE = 'complete'
 
 
 def parse_lat_lon_only(message):
@@ -373,7 +394,8 @@ async def whatsapp_webhook(request: Request, Body: str = Form(""), Latitude: str
                 'current_tank_index': 0,
                 'annotated_image_path': results.get('annotated_image_path'),
                 'satellite_image_path': results.get('satellite_image_path'),
-                'timestamp': time.time()
+                'timestamp': time.time(),
+                'state': STATE_COLLECTING_HEIGHTS
             }
             
             # Get public URL for annotated image
@@ -398,7 +420,183 @@ async def whatsapp_webhook(request: Request, Body: str = Form(""), Latitude: str
             return Response(content=str(resp), media_type="application/xml")
     
     # --------------------------------------------------
-    # SCENARIO 2: User is in height collection flow
+    # SCENARIO 2: User is uploading images (awaiting_images state)
+    # --------------------------------------------------
+    if From in user_sessions and user_sessions[From].get('state') == STATE_AWAITING_IMAGES:
+        session = user_sessions[From]
+        
+        # Check for timeout
+        elapsed_time = time.time() - session['last_activity']
+        if elapsed_time > IMAGE_COLLECTION_TIMEOUT:
+            print(f"⏱️ Image collection timeout for {From}")
+            resp.message(
+                "⏱️ *Image upload session expired.*\n\n"
+                "The 5-minute time limit has passed. Your submission has been saved without images.\n"
+                f"Submission ID: {session.get('submission_id', 'N/A')}"
+            )
+            
+            # Save metadata with empty image folder path
+            try:
+                save_location_images_metadata(
+                    submission_id=session['submission_id'],
+                    phone_number=From,
+                    image_folder_path=None,  # No images uploaded
+                    output_dir="Data"
+                )
+            except Exception as e:
+                print(f"⚠️ Failed to save empty metadata: {e}")
+            
+            # Clear session
+            del user_sessions[From]
+            return Response(content=str(resp), media_type="application/xml")
+        
+        # Extract media URL from form data
+        media_url = form_data.get('MediaUrl0')
+        media_type = form_data.get('MediaContentType0')
+        num_media = int(form_data.get('NumMedia', 0))
+        
+        if num_media == 0 or not media_url:
+            # No media attached - remind user
+            resp.message(
+                f"📸 Please send an image (not text).\n\n"
+                f"Images uploaded: {session['image_count']}/{REQUIRED_IMAGE_COUNT}\n"
+                f"Remaining: {REQUIRED_IMAGE_COUNT - session['image_count']}"
+            )
+            return Response(content=str(resp), media_type="application/xml")
+        
+        print(f"\n{'='*80}")
+        print(f"IMAGE UPLOAD RECEIVED ({session['image_count'] + 1}/{REQUIRED_IMAGE_COUNT})")
+        print(f"{'='*80}")
+        print(f"Media URL: {media_url}")
+        print(f"Media Type: {media_type}")
+        
+        # Get Twilio credentials
+        try:
+            twilio_auth = get_twilio_credentials()
+        except Exception as e:
+            print(f"❌ Failed to get Twilio credentials: {e}")
+            resp.message("❌ System error: Cannot process images at this time.")
+            return Response(content=str(resp), media_type="application/xml")
+        
+        # Download image from Twilio
+        image_index = session['image_count'] + 1
+        local_temp_dir = Path("Data") / "temp_images"
+        local_temp_dir.mkdir(parents=True, exist_ok=True)
+        local_image_path = local_temp_dir / f"temp_{From.replace(':', '_')}_{image_index}.jpg"
+        
+        success, error_msg = download_image_from_twilio(
+            media_url=media_url,
+            local_path=str(local_image_path),
+            auth=twilio_auth,
+            max_retries=2
+        )
+        
+        if not success:
+            print(f"❌ Image download failed: {error_msg}")
+            resp.message(
+                f"❌ Failed to download image: {error_msg}\n\n"
+                f"Please try sending the image again."
+            )
+            return Response(content=str(resp), media_type="application/xml")
+        
+        print(f"✓ Image downloaded successfully: {local_image_path}")
+        
+        # Upload to GCP
+        upload_result = process_user_image_upload(
+            local_image_path=str(local_image_path),
+            submission_id=session['submission_id'],
+            image_index=image_index,
+            max_retries=2
+        )
+        
+        if not upload_result['success']:
+            print(f"❌ GCP upload failed: {upload_result['error']}")
+            session['gcp_upload_failed'] = True
+        
+        # Update session
+        session['uploaded_images'].append({
+            'media_url': media_url,
+            'local_path': str(local_image_path),
+            'gcs_uri': upload_result.get('gcs_uri'),
+            'upload_success': upload_result['success']
+        })
+        session['image_count'] += 1
+        session['last_activity'] = time.time()
+        
+        # Check if we have all required images
+        if session['image_count'] >= REQUIRED_IMAGE_COUNT:
+            # All images collected - complete the submission
+            print(f"\n{'='*80}")
+            print(f"ALL {REQUIRED_IMAGE_COUNT} IMAGES COLLECTED")
+            print(f"{'='*80}")
+            
+            # Determine image folder path
+            if session['gcp_upload_failed']:
+                image_folder_path = None  # GCP upload failed
+                print(f"⚠️ Some images failed to upload to GCP")
+            else:
+                folder_name = f"Submission_{session['submission_id']}"
+                image_folder_path = f"gs://bot-dump/loc_wwtp_img/{folder_name}"
+                print(f"✓ All images uploaded to: {image_folder_path}")
+            
+            # Save metadata to master Excel
+            try:
+                excel_result = save_location_images_metadata(
+                    submission_id=session['submission_id'],
+                    phone_number=From,
+                    image_folder_path=image_folder_path,
+                    output_dir="Data"
+                )
+                
+                if excel_result['success']:
+                    print(f"✓ Metadata Excel saved: {excel_result['local_path']}")
+                    
+                    # Upload Excel to GCP
+                    gcs_uri = upload_location_metadata_to_gcp(excel_result['local_path'])
+                    if gcs_uri:
+                        print(f"✓ Metadata Excel uploaded to GCP: {gcs_uri}")
+                    else:
+                        print(f"⚠️ Metadata Excel saved locally but GCP upload failed")
+                else:
+                    print(f"⚠️ Failed to save metadata Excel: {excel_result['error']}")
+            except Exception as e:
+                print(f"⚠️ Error saving metadata: {e}")
+            
+            # Send completion message
+            completion_msg = (
+                f"✅ *Submission Complete!*\n\n"
+                f"📋 Submission ID: {session['submission_id']}\n"
+                f"📸 Images uploaded: {session['image_count']}\n"
+                f"💾 Data saved to cloud storage\n\n"
+                f"Thank you for your submission!"
+            )
+            
+            if session['gcp_upload_failed']:
+                completion_msg += (
+                    "\n\n⚠️ *Note:* Some images could not be uploaded to cloud storage. "
+                    "They have been saved locally for manual upload."
+                )
+            
+            resp.message(completion_msg)
+            
+            # Clear session
+            del user_sessions[From]
+            
+            print(f"✅ Submission {session['submission_id']} completed successfully")
+            return Response(content=str(resp), media_type="application/xml")
+        
+        # Still need more images
+        remaining = REQUIRED_IMAGE_COUNT - session['image_count']
+        progress_msg = (
+            f"✅ Image {session['image_count']}/{REQUIRED_IMAGE_COUNT} received!\n\n"
+            f"📸 Please send {remaining} more image{'s' if remaining > 1 else ''}."
+        )
+        
+        resp.message(progress_msg)
+        return Response(content=str(resp), media_type="application/xml")
+    
+    # --------------------------------------------------
+    # SCENARIO 3: User is in height collection flow
     # --------------------------------------------------
     if From in user_sessions:
         session = user_sessions[From]
@@ -442,6 +640,8 @@ async def whatsapp_webhook(request: Request, Body: str = Form(""), Latitude: str
         print(f"\n{'='*80}")
         print("Saving Tank Data to Excel")
         print(f"{'='*80}")
+        submission_id = None
+        timestamp_str = None
         try:
             # Get WWTP location from session
             wwtp_location = (session['lat'], session['lon'])
@@ -458,8 +658,14 @@ async def whatsapp_webhook(request: Request, Body: str = Form(""), Latitude: str
                 upload_to_gcp=True
             )
             
+            # Capture submission_id and timestamp for image folder
+            submission_id = excel_result.get('submission_id')
+            timestamp_str = excel_result.get('timestamp_str')
+            
             if excel_result['success']:
                 print(f"✓ Excel saved locally: {excel_result['local_path']}")
+                print(f"✓ Submission ID: {submission_id}")
+                print(f"✓ Timestamp: {timestamp_str}")
                 if excel_result['gcs_uri']:
                     print(f"✓ Excel uploaded to GCP: {excel_result['gcs_uri']}")
                 else:
@@ -488,10 +694,34 @@ async def whatsapp_webhook(request: Request, Body: str = Form(""), Latitude: str
         print(f"{'='*80}")
         print(final_message)
         
-        # Clear session
-        del user_sessions[From]
-        
+        # Send final summary
         resp.message(final_message)
+        
+        # Transition to image collection state
+        print(f"\n{'='*80}")
+        print("TRANSITIONING TO IMAGE COLLECTION")
+        print(f"{'='*80}")
+        
+        session['state'] = STATE_AWAITING_IMAGES
+        session['submission_id'] = submission_id
+        session['timestamp_str'] = timestamp_str
+        session['uploaded_images'] = []
+        session['image_count'] = 0
+        session['last_activity'] = time.time()
+        session['gcp_upload_failed'] = False
+        
+        # Request images from user
+        image_request_msg = (
+            f"\n📸 *Final Step: Upload Site Images*\n\n"
+            f"Please send {REQUIRED_IMAGE_COUNT} images of the WWTP site.\n"
+            f"• Send each image separately\n"
+            f"• All {REQUIRED_IMAGE_COUNT} images are required\n"
+            f"• The system will auto-complete after {REQUIRED_IMAGE_COUNT} images"
+        )
+        
+        resp.message(image_request_msg)
+        print(f"✓ Image collection started for Submission: {submission_id}")
+        
         return Response(content=str(resp), media_type="application/xml")
     
     # --------------------------------------------------
@@ -537,7 +767,8 @@ async def whatsapp_webhook(request: Request, Body: str = Form(""), Latitude: str
                 'current_tank_index': 0,
                 'annotated_image_path': results.get('annotated_image_path'),
                 'satellite_image_path': results.get('satellite_image_path'),
-                'timestamp': time.time()
+                'timestamp': time.time(),
+                'state': STATE_COLLECTING_HEIGHTS
             }
             
             # Get public URL for annotated image

@@ -311,10 +311,17 @@ def save_and_upload_tank_data(
         dict: {
             'local_path': Path to local Excel file or None,
             'gcs_uri': GCS URI or None,
-            'success': True if at least local save succeeded
+            'success': True if at least local save succeeded,
+            'submission_id': Unique submission ID (e.g., "SUB20260123_071530_1234"),
+            'timestamp_str': Timestamp string (e.g., "20260123_071530")
         }
     """
-    # Save locally
+    # Generate timestamp and submission ID
+    timestamp = datetime.now()
+    submission_id = generate_submission_id(phone_number, timestamp)
+    timestamp_str = timestamp.strftime("%Y%m%d_%H%M%S")
+    
+    # Save locally (pass the timestamp to ensure consistency)
     local_path = save_tank_data_to_excel(
         phone_number=phone_number,
         wwtp_location=wwtp_location,
@@ -322,7 +329,8 @@ def save_and_upload_tank_data(
         tank_heights=tank_heights,
         volume_data=volume_data,
         satellite_image_path=satellite_image_path,
-        output_dir=output_dir
+        output_dir=output_dir,
+        timestamp=timestamp  # Pass timestamp for consistency
     )
     
     gcs_uri = None
@@ -334,7 +342,9 @@ def save_and_upload_tank_data(
     return {
         'local_path': local_path,
         'gcs_uri': gcs_uri,
-        'success': local_path is not None
+        'success': local_path is not None,
+        'submission_id': submission_id,
+        'timestamp_str': timestamp_str
     }
 
 
