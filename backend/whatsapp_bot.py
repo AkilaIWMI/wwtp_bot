@@ -44,7 +44,10 @@ app = FastAPI()
 #     'uploaded_images': list (image upload metadata),
 #     'image_count': int (number of images uploaded),
 #     'last_activity': float (timestamp of last image activity),
-#     'gcp_upload_failed': bool (track if any GCP upload failed)
+#     'gcp_upload_failed': bool (track if any GCP upload failed),
+#     'final_summary': str (WWTP analysis summary to send AFTER images),
+#     'volume_data': dict (volume calculations for summary),
+#     'circular_tanks': list (stored for final summary)
 # }
 user_sessions = {}
 
@@ -301,9 +304,6 @@ def format_final_summary(circular_tanks, volume_data, gemini_data=None):
         message_parts.append("⚠️ *AI Disclaimer:* AI analysis is experimental and may contain errors. Please verify critical information.")
         message_parts.append("")
     
-    # Add note about images
-    message_parts.append("💾 *Note:* Annotated images saved locally for future reference.")
-    
     return "\n".join(message_parts)
 
 
@@ -367,6 +367,9 @@ async def whatsapp_webhook(request: Request, Body: str = Form(""), Latitude: str
             if not is_valid:
                 resp.message(f"❌ {error_msg}")
                 return Response(content=str(resp), media_type="application/xml")
+            
+            # Send processing message to user
+            resp.message("🔄 *Processing your request...*\n\nDownloading satellite imagery and analyzing the location. This may take a moment.")
             
             # Run WWTP analysis immediately
             print(f"Starting WWTP analysis for coordinates: ({lat}, {lon})")
@@ -562,7 +565,7 @@ async def whatsapp_webhook(request: Request, Body: str = Form(""), Latitude: str
             except Exception as e:
                 print(f"⚠️ Error saving metadata: {e}")
             
-            # Send completion message
+            # Send completion message FIRST
             completion_msg = (
                 f"✅ *Submission Complete!*\n\n"
                 f"📋 Submission ID: {session['submission_id']}\n"
@@ -578,6 +581,14 @@ async def whatsapp_webhook(request: Request, Body: str = Form(""), Latitude: str
                 )
             
             resp.message(completion_msg)
+            
+            # THEN send the WWTP analysis summary
+            final_summary = session.get('final_summary')
+            if final_summary:
+                resp.message(final_summary)
+                print(f"✓ Sent WWTP Analysis Summary to user")
+            else:
+                print(f"⚠️ No summary found in session - this shouldn't happen")
             
             # Clear session
             del user_sessions[From]
@@ -686,16 +697,13 @@ async def whatsapp_webhook(request: Request, Body: str = Form(""), Latitude: str
             except Exception as e:
                 print(f"Gemini analysis failed: {e}")
         
-        # Format final summary
+        # Format final summary (but don't send yet - save for after image upload)
         final_message = format_final_summary(circular_tanks, volume_data, gemini_data)
         
         print(f"\n{'='*80}")
-        print("SENDING FINAL SUMMARY TO USER")
+        print("SUMMARY PREPARED (will send after image upload)")
         print(f"{'='*80}")
         print(final_message)
-        
-        # Send final summary
-        resp.message(final_message)
         
         # Transition to image collection state
         print(f"\n{'='*80}")
@@ -710,9 +718,14 @@ async def whatsapp_webhook(request: Request, Body: str = Form(""), Latitude: str
         session['last_activity'] = time.time()
         session['gcp_upload_failed'] = False
         
-        # Request images from user
+        # Store summary data for later (to send after image upload)
+        session['final_summary'] = final_message
+        session['volume_data'] = volume_data
+        session['circular_tanks'] = circular_tanks
+        
+        # Request images from user (FIRST, before summary)
         image_request_msg = (
-            f"\n📸 *Final Step: Upload Site Images*\n\n"
+            f"📸 *Next Step: Upload Site Images*\n\n"
             f"Please send {REQUIRED_IMAGE_COUNT} images of the WWTP site.\n"
             f"• Send each image separately\n"
             f"• All {REQUIRED_IMAGE_COUNT} images are required\n"
@@ -739,6 +752,9 @@ async def whatsapp_webhook(request: Request, Body: str = Form(""), Latitude: str
             print(f"Validation failed: {error_msg}")
             resp.message(error_msg)
             return Response(content=str(resp), media_type="application/xml")
+        
+        # Send processing message to user
+        resp.message("🔄 *Processing your request...*\n\nDownloading satellite imagery and analyzing the location. This may take a moment.")
         
         # Run WWTP analysis immediately
         print(f"Starting WWTP analysis for coordinates: ({lat}, {lon})")
