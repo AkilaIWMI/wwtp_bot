@@ -48,7 +48,7 @@ jobs:
           service: '${{ env.SERVICE }}'
           region: '${{ env.REGION }}'
           image: '${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.SERVICE }}:${{ github.sha }}'
-          flags: '--port=5000' 
+          flags: '--memory=2Gi --cpu=1' 
           env_vars: |
             GCP_PROJECT_ID=${{ env.PROJECT_ID }}
             GCP_BUCKET_NAME=${{ secrets.GCP_BUCKET_NAME }}
