@@ -1,0 +1,76 @@
+name: 'Build and Deploy Hybrid App'
+
+on:
+  push:
+    branches:
+      - 'main'
+
+env:
+  PROJECT_ID: '${{ secrets.GCP_PROJECT_ID }}'
+  REGION: 'us-central1'           # Change if your region is different
+  SERVICE: 'whatsapp-bot-service' # The name of your Cloud Run Service
+  REPO_NAME: 'whatsapp-repo'      # The name of your Artifact Registry Repo
+
+jobs:
+  deploy:
+    runs-on: 'ubuntu-latest'
+
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@v4'
+
+      # 1. Authenticate using the Key you just added to Secrets
+      # (This replaces the complex Workload Identity section in the default template)
+      - id: 'auth'
+        name: 'Authenticate to Google Cloud'
+        uses: 'google-github-actions/auth@v2'
+        with:
+          credentials_json: '${{ secrets.GCP_SA_KEY }}'
+
+      # 2. Set up Cloud SDK (Needed for Docker and Storage commands)
+      - name: 'Set up Cloud SDK'
+        uses: 'google-github-actions/setup-gcloud@v2'
+
+      # 3. Configure Docker to use Google Artifact Registry
+      - name: 'Docker Auth'
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
+
+      # 4. Build and Push Container
+      - name: 'Build and Push Container'
+        run: |-
+          DOCKER_TAG="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.SERVICE }}:${{ github.sha }}"
+          docker build --tag "${DOCKER_TAG}" .
+          docker push "${DOCKER_TAG}"
+
+      # 5. Deploy to Cloud Run (With your Secrets injected!)
+      - name: 'Deploy to Cloud Run'
+        uses: 'google-github-actions/deploy-cloudrun@v2'
+        with:
+          service: '${{ env.SERVICE }}'
+          region: '${{ env.REGION }}'
+          image: '${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.SERVICE }}:${{ github.sha }}'
+          env_vars: |
+            GCP_PROJECT_ID=${{ env.PROJECT_ID }}
+            GCP_BUCKET_NAME=${{ secrets.GCP_BUCKET_NAME }}
+            GCP_BUCKET_PATH=${{ secrets.GCP_BUCKET_PATH }}
+            GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }}
+            TWILIO_ACCOUNT_SID=${{ secrets.TWILIO_ACCOUNT_SID }}
+            TWILIO_AUTH_TOKEN=${{ secrets.TWILIO_AUTH_TOKEN }}
+            TWILIO_WHATSAPP_NUMBER=${{ secrets.TWILIO_WHATSAPP_NUMBER }}
+
+      # 6. Upload Worker Code to Storage Bucket (For the VM)
+      - name: 'Upload Worker Code'
+        run: |
+          echo "Uploading code to gs://${{ secrets.GCP_BUCKET_NAME }}/${{ secrets.GCP_BUCKET_PATH }}/..."
+          
+          # Upload all Python files
+          gsutil -m cp *.py gs://${{ secrets.GCP_BUCKET_NAME }}/${{ secrets.GCP_BUCKET_PATH }}/
+          
+          # Upload requirements.txt if it exists
+          if [ -f requirements.txt ]; then
+            gsutil cp requirements.txt gs://${{ secrets.GCP_BUCKET_NAME }}/${{ secrets.GCP_BUCKET_PATH }}/
+          fi
+
+      # 7. Restart VM (Uncomment this when your VM is actually created!)
+      # - name: 'Restart Worker VM'
+      #   run: gcloud compute instances reset my-yolo-vm --zone=us-central1-a
