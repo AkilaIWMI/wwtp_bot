@@ -8,7 +8,7 @@ ENV PYTHONUNBUFFERED=1 \
     DEBIAN_FRONTEND=noninteractive \
     YOLO_CONFIG_DIR=/tmp/Ultralytics
 
-# Install system dependencies (GDAL, etc.)
+# Install ALL system dependencies (GDAL + Graphics for YOLO/OpenCV)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gdal-bin \
     libgdal-dev \
@@ -18,7 +18,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     gcc \
     g++ \
+    libpq-dev \
     curl \
+    wget \
+    git \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 # ============================================
@@ -30,23 +39,21 @@ WORKDIR /build
 
 # Create a virtual environment
 RUN python -m venv /opt/venv
-# Enable venv for subsequent commands
 ENV PATH="/opt/venv/bin:$PATH"
 
 COPY requirements.txt .
 
-# Install dependencies into the virtual environment
-# 1. Install numpy first (needed for GDAL compilation)
-RUN pip install --no-cache-dir "numpy<2.0"
+# STEP 1: Install Wheel and Numpy first (Required for GDAL compilation)
+RUN pip install --no-cache-dir wheel "numpy<2.0"
 
-# 2. Install GDAL matching system version
-# We set C_INCLUDE_PATH to ensure pip finds the GDAL headers
+# STEP 2: Compile GDAL with NumPy support enabled
+# We tell the compiler exactly where the GDAL headers are
 ENV C_INCLUDE_PATH=/usr/include/gdal
 ENV CPLUS_INCLUDE_PATH=/usr/include/gdal
-
 RUN pip install --no-cache-dir GDAL==$(gdal-config --version)
 
-# 3. Install remaining requirements
+# STEP 3: Install the rest of the requirements
+# We use --no-deps for numpy if it's in the file, or just let pip realize it's satisfied
 RUN pip install --no-cache-dir -r requirements.txt
 
 # ============================================
@@ -54,28 +61,26 @@ RUN pip install --no-cache-dir -r requirements.txt
 # ============================================
 FROM base AS runtime
 
-# Copy the virtual environment from builder
+# Copy the virtual environment
 COPY --from=builder /opt/venv /opt/venv
-
-# Enable venv in the runtime
 ENV PATH="/opt/venv/bin:$PATH"
 
 RUN useradd -m -u 1000 -s /bin/bash appuser
 WORKDIR /app
 
 # Copy application code
-# NOTE: Ensure the 'backend' folder exists in your repo root!
 COPY backend/ /app/backend/
 
-# Create necessary dirs with correct permissions
-RUN mkdir -p /app/backend/Data /tmp/Ultralytics && \
+# Create necessary directories and set permissions
+RUN mkdir -p /app/backend/Data /app/config /tmp/Ultralytics && \
     chown -R appuser:appuser /app /tmp/Ultralytics
 
 USER appuser
 EXPOSE 5000
 
-# Set working directory to where the app code is
-WORKDIR /app/backend
+# Healthcheck to ensure the container is actually responding
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:5000/ || exit 1
 
-# Using the venv python executable explicitly is safest
+WORKDIR /app/backend
 CMD ["uvicorn", "whatsapp_bot:app", "--host", "0.0.0.0", "--port", "5000"]
