@@ -552,14 +552,10 @@ ngrok http 5000
 - Verify all environment variables are properly set
 - Test with actual WhatsApp messages before deploying
 
-## 📄 License
-
-[Specify your license here]
-
 ## 👥 Maintainers
 
-- [Your Name/Team]
-- Contact: [Your Contact Information]
+- Akila
+- Contact: akilapremarathna0@gmail.com
 
 ## 🙏 Acknowledgments
 
